@@ -194,7 +194,17 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
 				.longOpt(MAPPING_FORMAT_OPTION_LONG)
 				.argName(MAPPING_FORMAT_OPTION_LONG)
 				.hasArg()
-				.desc("Mapping file RDF format")
+				.desc("Mapping file RDF format:\r\n" + 
+						"ttl (text/turtle), \r\n" + 
+						"nt (application/n-triples), \r\n" + 
+						"nq (application/n-quads), \r\n" + 
+						"rdf (application/rdf+xml), \r\n" + 
+						"jsonld (application/ld+json), \r\n" + 
+						"trig (application/trig), \r\n" + 
+						"n3 (text/n3), \r\n" + 
+						"trix (application/trix), \r\n" + 
+						"brf (application/x-binary-rdf), \r\n" + 
+						"rj (application/rdf+json)\r\n")
 				.build();		
 		options.addOption(formatOption);
 		
@@ -203,7 +213,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
 				.longOpt(RELATIVE_SOURCE_LOCATION_OPTION_LONG)
 				.argName(RELATIVE_SOURCE_LOCATION_OPTION_LONG)
 				.hasArg()
-				.desc("Mapping file RDF format")
+				.desc("Specify directory to use to find relative logical source in mapping file")
 				.build();		
 		options.addOption(relSrcLocOption);
 		
@@ -221,7 +231,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
 				.longOpt(FUNCTION_OPTION_LONG)
 				.argName(FUNCTION_OPTION_LONG)
 				.hasArgs()
-				.desc("Transformation functions to add to mapper")
+				.desc("Transformation function classes from -"+ FUNCTION_JAR_OPTION +" to add to mapper")
 				.build();		
 		options.addOption(functionsOption);
 		
@@ -241,7 +251,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
 				.argName(OUTPUT_FORMAT_OPTION_LONG)
 				.hasArg()
 				.required()
-				.desc("Output RDF format")
+				.desc("Output RDF format (see -"+ MAPPING_FORMAT_OPTION +")")
 				.build();		
 		options.addOption(outputFormatOption);
 		
