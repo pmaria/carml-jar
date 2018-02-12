@@ -250,7 +250,6 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
 				.longOpt(OUTPUT_FORMAT_OPTION_LONG)
 				.argName(OUTPUT_FORMAT_OPTION_LONG)
 				.hasArg()
-				.required()
 				.desc("Output RDF format (see -"+ MAPPING_FORMAT_OPTION +")")
 				.build();		
 		options.addOption(outputFormatOption);
