@@ -5,9 +5,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
 public class CarmlJar {
-	
-	public static void main(String... args) {
-		SpringApplication.run(CarmlJar.class, args);
-	}
+
+  public static void main(String... args) {
+    SpringApplication.run(CarmlJar.class, args);
+  }
 
 }

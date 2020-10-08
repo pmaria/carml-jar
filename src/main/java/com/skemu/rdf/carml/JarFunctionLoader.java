@@ -9,23 +9,24 @@ import org.xeustechnologies.jcl.JarClassLoader;
 import org.xeustechnologies.jcl.JclObjectFactory;
 
 public class JarFunctionLoader {
-	
-	private JarFunctionLoader() {}
-	
-	public static Set<Object> load(Set<String> functionClasses, Set<File> jars) {
-		JarClassLoader jcl = new JarClassLoader();
-		try {
-			for (File jar : jars) {
-				jcl.add(new FileInputStream(jar));
-			}
-		} catch (FileNotFoundException e) {
-			throw new RuntimeException("Could not find jar file", e);
-		}
 
-		JclObjectFactory factory = JclObjectFactory.getInstance();
-		return functionClasses.stream()
-				.map(f -> factory.create(jcl, f))
-				.collect(ImmutableCollectors.toImmutableSet());
-	}
+  private JarFunctionLoader() {
+  }
+
+  public static Set<Object> load(Set<String> functionClasses, Set<File> jars) {
+    JarClassLoader jcl = new JarClassLoader();
+    try {
+      for (File jar : jars) {
+        jcl.add(new FileInputStream(jar));
+      }
+    } catch (FileNotFoundException e) {
+      throw new RuntimeException("Could not find jar file", e);
+    }
+
+    JclObjectFactory factory = JclObjectFactory.getInstance();
+    return functionClasses.stream()
+        .map(f -> factory.create(jcl, f))
+        .collect(ImmutableCollectors.toImmutableSet());
+  }
 
 }
