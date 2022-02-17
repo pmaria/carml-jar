@@ -10,7 +10,7 @@ Usage:
 |-f,--format        |Mapping file RDF format.<br>If left empty the format will be determined automatically for each mapping file.<br>If provided, all mappings will be assumed to have the provided format.<br><br>The following formats are supported:<br>  ttl (text/turtle),<br>nt (application/n-triples),<br>nq (application/n-quads),<br>rdf (application/rdf+xml),<br>jsonld (application/ld+json),<br>trig (application/trig),<br>n3 (text/n3),<br>trix (application/trix),<br>brf (application/x-binary-rdf),<br>rj (application/rdf+json)|
 |-fn,--functions    |Transformation function classes from `-j` to add to mapper|
 |-i,--input         |Input file path. For dynamic binding of input source. If provided, will be bound as the `rml:source` for logical sources. This requires usage of `carl:Stream`|
-|-j,--jars          |Jar files containing transformation functions to add to mapper|
+|-j,--jars          |Jar files (fat jar!) containing transformation functions to add to mapper|
 |-m,--mapping       |Mapping file path(s) and/or mapping file directory path(s)|
 |-o,--output        |Output file path, if left empty will output to console|
 |-of,--outformat    |Output RDF format (see `-f`)|

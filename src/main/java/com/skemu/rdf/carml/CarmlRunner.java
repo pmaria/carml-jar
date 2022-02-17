@@ -1,26 +1,32 @@
 package com.skemu.rdf.carml;
 
+import com.google.common.collect.ImmutableSet;
+import com.taxonic.carml.engine.RmlMapper;
+import com.taxonic.carml.engine.rdf.RdfRmlMapper;
+import com.taxonic.carml.logicalsourceresolver.CsvResolver;
+import com.taxonic.carml.logicalsourceresolver.JsonPathResolver;
+import com.taxonic.carml.logicalsourceresolver.XPathResolver;
 import com.taxonic.carml.model.Resource;
-import com.taxonic.carml.util.IoUtils;
+import com.taxonic.carml.model.TriplesMap;
 import com.taxonic.carml.util.ModelSerializer;
+import com.taxonic.carml.util.Models;
+import com.taxonic.carml.util.RmlMappingLoader;
 import com.taxonic.carml.util.RmlNamespaces;
-import java.io.BufferedWriter;
+import com.taxonic.carml.vocab.Rdf;
+import java.io.BufferedOutputStream;
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.StringWriter;
-import java.io.Writer;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
@@ -33,31 +39,26 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.eclipse.rdf4j.model.Model;
 import org.eclipse.rdf4j.model.Namespace;
+import org.eclipse.rdf4j.model.Statement;
 import org.eclipse.rdf4j.model.impl.LinkedHashModel;
+import org.eclipse.rdf4j.model.util.ModelCollector;
 import org.eclipse.rdf4j.rio.RDFFormat;
+import org.eclipse.rdf4j.rio.RDFHandlerException;
+import org.eclipse.rdf4j.rio.RDFWriter;
 import org.eclipse.rdf4j.rio.RDFWriterRegistry;
 import org.eclipse.rdf4j.rio.Rio;
 import org.eclipse.rdf4j.rio.WriterConfig;
 import org.eclipse.rdf4j.rio.helpers.BasicWriterSettings;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.boot.CommandLineRunner;
-import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
-
-import com.google.common.collect.ImmutableSet;
-import com.taxonic.carml.engine.RmlMapper;
-import com.taxonic.carml.logical_source_resolver.CsvResolver;
-import com.taxonic.carml.logical_source_resolver.JsonPathResolver;
-import com.taxonic.carml.logical_source_resolver.XPathResolver;
-import com.taxonic.carml.model.TriplesMap;
-import com.taxonic.carml.rdf_mapper.util.ImmutableCollectors;
-import com.taxonic.carml.util.RmlMappingLoader;
-import com.taxonic.carml.vocab.Rdf;
+import org.springframework.util.StopWatch;
+import reactor.core.publisher.Flux;
 
 @Slf4j
 @Component
-@Order(value = Ordered.LOWEST_PRECEDENCE)
+@Order
 public class CarmlRunner implements CommandLineRunner, InitializingBean {
 
   private static final String MAPPING_FILE_OPTION = "m";
@@ -100,6 +101,9 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
 
   private static final String OUTPUT_CONTEXT_OPTION_LONG = "context";
 
+  private static final Set<RDFFormat> POTENTIALLY_STREAMING =
+      Set.of(RDFFormat.NTRIPLES, RDFFormat.NQUADS, RDFFormat.TURTLE, RDFFormat.TRIG);
+
   private Options options;
 
   private CommandLineParser cmdParser;
@@ -117,14 +121,14 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
       System.exit(1);
     }
 
-    RmlMapper mapper = prepareMapper(cmd);
+    RmlMapper<Statement> mapper = prepareMapper(cmd);
     Set<TriplesMap> mapping = loadMapping(cmd);
 
     if (log.isDebugEnabled()) {
-      Model mappingModel = mapping.stream()
+      var mappingModel = mapping.stream()
           .map(Resource::asRdf)
           .flatMap(Model::stream)
-          .collect(Collectors.toCollection(LinkedHashModel::new));
+          .collect(ModelCollector.toModel());
 
       RmlNamespaces.applyRmlNameSpaces(mappingModel);
       getOutputNamespaceDeclarations(cmd).forEach(mappingModel::setNamespace);
@@ -136,20 +140,44 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
     }
 
     log.info("Executing mapping ...");
-    Model model = mapper.map(mapping);
+    StopWatch stopWatch = new StopWatch();
+    stopWatch.start();
+    Flux<Statement> statements;
+    if (cmd.hasOption(INPUT_FILE_OPTION)) {
+      var inputPath = Paths.get(cmd.getOptionValue(INPUT_FILE_OPTION));
+      try {
+        var inputStream = Files.newInputStream(inputPath);
+        statements = mapper.map(inputStream);
+      } catch (IOException exception) {
+        throw new CarmlJarException(String.format("Could not read input file %s", inputPath), exception);
+      }
+    } else {
+      statements = mapper.map();
+    }
 
-    getOutputNamespaceDeclarations(cmd).forEach(model::setNamespace);
+    handleOutput(cmd, statements);
+    stopWatch.stop();
+    log.info("Finished processing.");
+    log.info("Processing took: {} seconds,{}{}",stopWatch.getTotalTimeSeconds(), System.lineSeparator(), stopWatch.prettyPrint());
 
+    // TODO cleanup resources / close inputstream
+  }
+
+
+  private void handleOutput(CommandLine cmd, Flux<Statement> statements) {
     String outputPath = cmd.getOptionValue(OUTPUT_FILE_OPTION);
-    if (outputPath == null) {
-      log.info("No output file specified. Outputting to console...");
-      StringWriter writer = new StringWriter();
-      writeRdf(model, loadOutputRdfFormat(cmd), writer);
 
-      System.out.println(String.format("%n%s", writer.toString()));
+    if (outputPath == null) {
+      log.info("No output file specified. Outputting to console...{}", System.lineSeparator());
+      writeRdf(statements, loadOutputRdfFormat(cmd), getOutputNamespaceDeclarations(cmd), false, System.out);
     } else {
       log.info("Writing output to {} ...", outputPath);
-      writeToFile(model, outputPath, loadOutputRdfFormat(cmd));
+      try (var outputStream = new BufferedOutputStream(Files
+          .newOutputStream(Paths.get(outputPath), StandardOpenOption.CREATE))) {
+        writeRdf(statements, loadOutputRdfFormat(cmd), getOutputNamespaceDeclarations(cmd), false, outputStream);
+      } catch (IOException ioException) {
+        ioException.printStackTrace();
+      }
     }
   }
 
@@ -157,20 +185,21 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
     helpFormatter.printHelp("carml", options, true);
   }
 
-  private RmlMapper prepareMapper(CommandLine cmd) {
+  private RmlMapper<Statement> prepareMapper(CommandLine cmd) {
     Objects.requireNonNull(cmd);
 
-    RmlMapper.Builder mapperBuilder = RmlMapper.newBuilder()
-        .setLogicalSourceResolver(Rdf.Ql.JsonPath, new JsonPathResolver())
-        .setLogicalSourceResolver(Rdf.Ql.XPath, new XPathResolver())
-        .setLogicalSourceResolver(Rdf.Ql.Csv, new CsvResolver());
+    var mapperBuilder = RdfRmlMapper.builder()
+        .setLogicalSourceResolver(Rdf.Ql.Csv, CsvResolver::getInstance)
+        .setLogicalSourceResolver(Rdf.Ql.JsonPath, JsonPathResolver::getInstance)
+        .setLogicalSourceResolver(Rdf.Ql.XPath, XPathResolver::getInstance)
+        .triplesMaps(loadMapping(cmd));
 
     if (cmd.hasOption(FUNCTION_JAR_OPTION) && cmd.hasOption(FUNCTION_OPTION)) {
       Set<String> fnClasses = ImmutableSet.copyOf(cmd.getOptionValues(FUNCTION_OPTION));
 
       Set<File> fnJars = Arrays.stream(cmd.getOptionValues(FUNCTION_JAR_OPTION))
           .map(File::new)
-          .collect(ImmutableCollectors.toImmutableSet());
+          .collect(ImmutableSet.toImmutableSet());
 
       log.debug("Loading transformation functions ...");
       Set<Object> functions = JarFunctionLoader.load(fnClasses, fnJars);
@@ -181,18 +210,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
       mapperBuilder.fileResolver(Paths.get(cmd.getOptionValue(RELATIVE_SOURCE_LOCATION_OPTION)));
     }
 
-    RmlMapper mapper = mapperBuilder.build();
-
-    if (cmd.hasOption(INPUT_FILE_OPTION)) {
-      Path inputPath = Paths.get(cmd.getOptionValue(INPUT_FILE_OPTION));
-      try(InputStream is = Files.newInputStream(inputPath)) {
-        mapper.bindInputStream(is);
-      } catch (IOException exception) {
-        throw new CarmlJarException(String.format("Could not read input file %s", inputPath), exception);
-      }
-    }
-
-    return mapper;
+    return mapperBuilder.build();
   }
 
   private Set<TriplesMap> loadMapping(CommandLine cmd) {
@@ -203,23 +221,23 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
         .map(Paths::get)
         .toArray(Path[]::new);
 
-    log.info("Loading mapping from {} ...", paths);
+    log.info("Loading mapping from {} ...", Arrays.asList(paths));
 
     if (cmd.hasOption(MAPPING_FORMAT_OPTION)) {
       String format = cmd.getOptionValue(MAPPING_FORMAT_OPTION);
-      RDFFormat rdfFormat = determineRdfFormat(format).orElseThrow(
-          () -> new MappingFormatException(String.format("Unrecognized mapping format '%s' specified.", format)));
+      var rdfFormat = determineRdfFormat(format).orElseThrow(
+          () -> new MappingException(String.format("Unrecognized mapping format '%s' specified.", format)));
 
       return RmlMappingLoader.build().load(rdfFormat, paths);
     } else {
       Model mappingModel = Arrays.stream(paths)
           .flatMap(path -> resolvePaths(path).stream())
           .flatMap(path -> {
-            try (InputStream is = Files.newInputStream(path)) {
-              String fileName = path.getFileName().toString();
+            try (var is = Files.newInputStream(path)) {
+              var fileName = path.getFileName().toString();
               Optional<RDFFormat> rdfFormat = Rio.getParserFormatForFileName(path.getFileName().toString());
 
-              Model model = rdfFormat.map(pathFormat -> IoUtils.parse(is, pathFormat)).orElseGet(null);
+              var model = rdfFormat.map(pathFormat -> Models.parse(is, pathFormat)).orElseGet(null);
               if (model == null) {
                 log.warn("Could not determine mapping format for filename '{}', ignoring this file...", fileName);
                 return Stream.empty();
@@ -278,7 +296,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
     }
 
     if (cmd.hasOption(OUTPUT_CONTEXT_OPTION)) {
-      File contextFile = new File(cmd.getOptionValue(OUTPUT_CONTEXT_OPTION));
+      var contextFile = new File(cmd.getOptionValue(OUTPUT_CONTEXT_OPTION));
       namespaces.addAll(ContextLoader.getNamespaces(contextFile));
     }
 
@@ -291,7 +309,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
     cmdParser = new DefaultParser();
     helpFormatter = new HelpFormatter();
 
-    Option mappingOption =
+    var mappingOption =
         Option.builder(MAPPING_FILE_OPTION)
             .longOpt(MAPPING_FILE_OPTION_LONG)
             .argName(MAPPING_FILE_OPTION_LONG)
@@ -301,7 +319,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(mappingOption);
 
-    Option formatOption =
+    var formatOption =
         Option.builder(MAPPING_FORMAT_OPTION)
             .longOpt(MAPPING_FORMAT_OPTION_LONG)
             .argName(MAPPING_FORMAT_OPTION_LONG)
@@ -321,7 +339,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(formatOption);
 
-    Option relSrcLocOption =
+    var relSrcLocOption =
         Option.builder(RELATIVE_SOURCE_LOCATION_OPTION)
             .longOpt(RELATIVE_SOURCE_LOCATION_OPTION_LONG)
             .argName(RELATIVE_SOURCE_LOCATION_OPTION_LONG)
@@ -330,7 +348,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(relSrcLocOption);
 
-    Option inputOption =
+    var inputOption =
         Option.builder(INPUT_FILE_OPTION)
             .longOpt(INPUT_FILE_OPTION_LONG)
             .argName(INPUT_FILE_OPTION_LONG)
@@ -340,7 +358,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(inputOption);
 
-    Option functionJarsOption =
+    var functionJarsOption =
         Option.builder(FUNCTION_JAR_OPTION)
             .longOpt(FUNCTION_JAR_OPTION_LONG)
             .argName(FUNCTION_JAR_OPTION_LONG)
@@ -349,7 +367,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(functionJarsOption);
 
-    Option functionsOption =
+    var functionsOption =
         Option.builder(FUNCTION_OPTION)
             .longOpt(FUNCTION_OPTION_LONG)
             .argName(FUNCTION_OPTION_LONG)
@@ -358,7 +376,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(functionsOption);
 
-    Option outputOption =
+    var outputOption =
         Option.builder(OUTPUT_FILE_OPTION)
             .longOpt(OUTPUT_FILE_OPTION_LONG)
             .argName(OUTPUT_FILE_OPTION_LONG)
@@ -367,7 +385,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(outputOption);
 
-    Option outputFormatOption =
+    var outputFormatOption =
         Option.builder(OUTPUT_FORMAT_OPTION)
             .longOpt(OUTPUT_FORMAT_OPTION_LONG)
             .argName(OUTPUT_FORMAT_OPTION_LONG)
@@ -376,7 +394,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(outputFormatOption);
 
-    Option outputNamespaceOption =
+    var outputNamespaceOption =
         Option.builder(OUTPUT_NAMESPACE_OPTION)
             .longOpt(OUTPUT_NAMESPACE_OPTION_LONG)
             .argName(OUTPUT_NAMESPACE_OPTION_LONG)
@@ -387,7 +405,7 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
             .build();
     options.addOption(outputNamespaceOption);
 
-    Option outputContextOption =
+    var outputContextOption =
         Option.builder(OUTPUT_CONTEXT_OPTION)
             .longOpt(OUTPUT_CONTEXT_OPTION_LONG)
             .argName(OUTPUT_CONTEXT_OPTION_LONG)
@@ -397,23 +415,43 @@ public class CarmlRunner implements CommandLineRunner, InitializingBean {
     options.addOption(outputContextOption);
   }
 
-  private static void writeToFile(Model model, String outputFilePath, RDFFormat format) {
-    FileWriter fw;
-
-    try {
-      fw = new FileWriter(outputFilePath);
-    } catch (IOException e) {
-      throw new RuntimeException(e);
+  private static void writeRdf(Flux<Statement> statements, RDFFormat format, Set<Namespace> namespaces, boolean pretty,
+                               OutputStream outputStream) {
+    if (isOutputStreamable(format, pretty)) {
+      writeRdfStreamable(statements, format, namespaces, outputStream);
+    } else {
+      writeRdfPretty(statements, format, namespaces, outputStream);
     }
-
-    writeRdf(model, format, fw);
   }
 
-  private static void writeRdf(Model model, RDFFormat format, Writer writer) {
-    BufferedWriter bw = new BufferedWriter(writer);
-    WriterConfig config = new WriterConfig();
+  private static boolean isOutputStreamable(RDFFormat format, boolean pretty) {
+    // TODO handle pretty
+    return POTENTIALLY_STREAMING.contains(format);
+  }
+
+  private static void writeRdfPretty(Flux<Statement> statementFlux, RDFFormat format, Set<Namespace> namespaces,
+                                     OutputStream outputStream) {
+    var config = new WriterConfig();
     config.set(BasicWriterSettings.PRETTY_PRINT, true);
-    Rio.write(model, bw, format, config);
+    Model model = statementFlux.collect(ModelCollector.toModel()).block();
+    namespaces.forEach(model::setNamespace);
+    Rio.write(model, outputStream, format, config);
+  }
+
+  private static void writeRdfStreamable(Flux<Statement> statementFlux, RDFFormat format, Set<Namespace> namespaces,
+                                         OutputStream outputStream) {
+    RDFWriter rdfWriter = Rio.createWriter(format, outputStream);
+
+    try {
+      rdfWriter.startRDF();
+      namespaces.forEach(namespace -> rdfWriter.handleNamespace(namespace.getPrefix(), namespace.getName()));
+      statementFlux/*.take(1000000)*/
+          .doOnNext(rdfWriter::handleStatement)
+          .blockLast();
+      rdfWriter.endRDF();
+    } catch (RDFHandlerException rdfHandlerException) {
+      throw new CarmlJarException("Exception occurred while writing output.", rdfHandlerException);
+    }
   }
 
 }
